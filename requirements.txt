@@ -1,7 +1,5 @@
-python-telegram-bot==21.10
-requests==2.32.3
-beautifulsoup4==4.12.3
-lxml==5.1.0
-youtube-transcript-api==1.2.3
-readability-lxml==0.8.1
-nltk==3.9.1
+aiogram==3.17.0
+transformers==4.46.3
+torch==2.5.1
+natasha==1.5.1
+numpy==1.26.4
