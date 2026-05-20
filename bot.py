@@ -21,14 +21,8 @@ os.makedirs(DATA_DIR, exist_ok=True)
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 1. Инициализируем модель суммаризации (можно выбрать любую из Hugging Face)
-# Попробуй одну из этих моделей, они все рабочие:
-# Модель для английского (легкая, работает быстро):
-# MODEL_NAME = "facebook/bart-large-cnn"
-# Модель для английского (универсальная, отлично справляется с новостями и блогами, хорошо работает с длинными текстами):
-MODEL_NAME = "google/pegasus-cnn_dailymail"
-# Модель для русского (экспериментальная, результат может быть нестабильным):
-# MODEL_NAME = "IlyaGusev/rut5-base-sum-gazeta"
+
+MODEL_NAME = None   
 logger.info(f"Загрузка модели {MODEL_NAME}... Это может занять несколько минут при первом запуске.")
 try:
     summarizer = pipeline("summarization", model=MODEL_NAME, device=-1) # device=-1 говорит использовать CPU
