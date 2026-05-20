@@ -1,229 +1,187 @@
-import os
-import re
 import logging
-from bs4 import BeautifulSoup
-from readability import Document
-from youtube_transcript_api import YouTubeTranscriptApi
-import requests
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-import nltk
-from nltk.corpus import stopwords
-from nltk.tokenize import sent_tokenize, word_tokenize
-import string
-from collections import Counter
-import heapq
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import Message
+from collections import defaultdict, deque
+from transformers import T5ForConditionalGeneration, T5Tokenizer
+from natasha import Doc, Segmenter, NewsNERTagger, NewsEmbedding
+import re
+from typing import List, Dict
 
-# --- НАСТРОЙКИ ---
-BOT_TOKEN = "7962442088:AAE_KLiwfH5QRiGiCuUs1gz0Wg8ShcK4deI"
+API_TOKEN = '7962442088:AAE_KLiwfH5QRiGiCuUs1gz0Wg8ShcK4deI'
 
-DATA_DIR = os.getenv('DATA_DIR', '/app/data')
-os.makedirs(DATA_DIR, exist_ok=True)
-
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Загружаем ресурсы NLTK при старте (один раз)
-try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    nltk.download('punkt', quiet=True)
-try:
-    nltk.data.find('corpora/stopwords')
-except LookupError:
-    nltk.download('stopwords', quiet=True)
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher()
 
-# --- СЛУЖЕБНЫЕ ФУНКЦИИ ---
+# Хранилище сообщений для каждого пользователя
+messages_store: Dict[str, deque] = defaultdict(lambda: deque(maxlen=100))
 
-def get_youtube_transcript(url):
-    """Извлекает субтитры из YouTube видео (русский или английский)."""
-    import re
-    from youtube_transcript_api import YouTubeTranscriptApi
-    from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled
+default_message_limit = 100
 
-    # --- 1. Извлекаем ID видео из ссылки ---
-    video_id_match = re.search(r'(?:v=|\/)([0-9A-Za-z_-]{11})(?:[?&]|$)', url)
-    video_id = video_id_match.group(1) if video_id_match else None
+# Суммаризация
+MODEL_NAME = "cointegrated/rut5-base-absum"
+tokenizer = T5Tokenizer.from_pretrained(MODEL_NAME, legacy=False)
+model = T5ForConditionalGeneration.from_pretrained(MODEL_NAME)
 
-    if not video_id:
-        return None, "❌ Не удалось извлечь ID видео из ссылки."
+# Natasha
+segmenter = Segmenter()
+ner_tagger = NewsNERTagger(NewsEmbedding())
 
-    # --- 2. Пытаемся найти и получить субтитры ---
-    try:
-        # Пробуем получить список всех доступных субтитров
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+class TextProcessor:
+    @staticmethod
+    def clean_text(text: str) -> str:
+        text = re.sub(r'http\S+', '', text)
+        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'[^\w\s.,!?а-яА-Я]', '', text)
+        return text.strip()
 
-        # Пытаемся найти русские или английские субтитры (ручные или авто)
-        transcript = None
-        try:
-            # Сначала ищем русские
-            transcript = transcript_list.find_transcript(['ru'])
-        except NoTranscriptFound:
-            try:
-                # Если русских нет, ищем английские
-                transcript = transcript_list.find_transcript(['en'])
-            except NoTranscriptFound:
-                # Если нет ни русских, ни английских, но есть другие
-                # отдаем первый попавшийся
-                transcript = list(transcript_list)[0]
+    @staticmethod
+    def extract_named_entities(text: str) -> str:
+        doc = Doc(text)
+        doc.segment(segmenter)
+        doc.tag_ner(ner_tagger)
+        entities = {"PER": [], "ORG": [], "LOC": [], "DATE": []}
 
-        if transcript:
-            # Получаем текст субтитров с помощью .fetch()
-            # .fetch() — это современный и более надежный метод
-            data = transcript.fetch()
-            full_text = " ".join([entry['text'] for entry in data])
-            return full_text, None
-        else:
-            return None, "❌ Для этого видео не найдено доступных субтитров."
+        for span in doc.spans:
+            entity_text = span.text.strip()
+            if span.type in entities and entity_text != "Я":
+                entities[span.type].append(entity_text)
 
-    # --- 3. Обрабатываем специфичные ошибки ---
-    except TranscriptsDisabled:
-        return None, "❌ Субтитры для этого видео отключены автором."
-    except NoTranscriptFound:
-        return None, "❌ Не найдено субтитров на русском или английском языке."
-    except Exception as e:
-        print(f"Ошибка при получении субтитров: {e}")
-        return None, f"❌ Произошла техническая ошибка при обработке видео."
-
-def extract_article_text(url):
-    """Извлекает заголовок и основной текст из статьи."""
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-
-        doc = Document(response.text)
-        title = doc.title()
-        content_html = doc.summary()
-
-        soup = BeautifulSoup(content_html, 'lxml')
-        for script in soup(["script", "style"]):
-            script.decompose()
-        text = soup.get_text()
-        lines = (line.strip() for line in text.splitlines())
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        text = ' '.join(chunk for chunk in chunks if chunk)
-
-        return title, text, None
-    except Exception as e:
-        logger.error(f"Ошибка при обработке статьи: {e}")
-        return None, None, f"❌ Ошибка: {str(e)}"
-
-def extractive_summarization(text, num_sentences=5):
-    """
-    Выделяет наиболее важные предложения на основе частотности слов (без нейросетей).
-    """
-    # Токенизируем предложения
-    sentences = sent_tokenize(text)
-    if len(sentences) <= num_sentences:
-        return text
-
-    # Стоп-слова для русского и английского
-    stop_words = set(stopwords.words('russian') + stopwords.words('english') + list(string.punctuation))
-    
-    # Считаем частоту слов
-    word_frequencies = Counter()
-    for word in word_tokenize(text.lower()):
-        if word not in stop_words:
-            word_frequencies[word] += 1
-
-    # Нормализуем
-    if word_frequencies:
-        max_freq = max(word_frequencies.values())
-        for word in word_frequencies:
-            word_frequencies[word] /= max_freq
-
-    # Оцениваем предложения
-    sentence_scores = {}
-    for sent in sentences:
-        for word in word_tokenize(sent.lower()):
-            if word in word_frequencies:
-                if len(sent.split(' ')) < 30:  # игнорируем слишком короткие
-                    sentence_scores[sent] = sentence_scores.get(sent, 0) + word_frequencies[word]
-
-    # Берём топ предложений
-    if sentence_scores:
-        summary_sentences = heapq.nlargest(num_sentences, sentence_scores, key=sentence_scores.get)
-        summary = ' '.join(summary_sentences)
-        return summary
-    else:
-        # Если ничего не нашли, возвращаем первые num_sentences предложений
-        return ' '.join(sentences[:num_sentences])
-
-def summarize_text(text):
-    """Основная функция суммаризации (только extractive)."""
-    if not text or len(text.strip()) == 0:
-        return "❌ Нет текста для суммаризации."
-    return extractive_summarization(text)
-
-# --- ОБРАБОТЧИКИ БОТА ---
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 Привет! Я бот для краткого пересказа статей и видео.\n\n"
-        "📌 Отправь мне ссылку на статью или YouTube видео.\n"
-        "Я извлеку главные мысли и пришлю краткое содержание.\n\n"
-        "⚡️ Работает полностью локально, без передачи данных.",
-        parse_mode='Markdown'
-    )
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📖 Как пользоваться:\n\n"
-        "1. Скопируй ссылку на статью или YouTube видео.\n"
-        "2. Отправь ссылку в чат.\n"
-        "3. Получи краткий пересказ (3-5 предложений).\n\n"
-        "Доступные команды:\n/start - Приветствие\n/help - Справка"
-    )
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_message = update.message.text.strip()
-    
-    is_youtube = 'youtube.com/watch' in user_message or 'youtu.be/' in user_message
-    is_article = user_message.startswith('http') and not is_youtube
-
-    if is_youtube:
-        await update.message.reply_text("🎬 Обрабатываю YouTube видео...")
-        transcript, error = get_youtube_transcript(user_message)
-        if error:
-            await update.message.reply_text(error)
-            return
-        if not transcript:
-            await update.message.reply_text("❌ Не удалось извлечь субтитры.")
-            return
+        entity_text = ""
+        if entities["PER"]:
+            entity_text += f"\n👤 Персоны: {', '.join(set(entities['PER']))}"
+        if entities["ORG"]:
+            entity_text += f"\n🏢 Организации: {', '.join(set(entities['ORG']))}"
+        if entities["LOC"]:
+            entity_text += f"\n🌍 Локации: {', '.join(set(entities['LOC']))}"
+        if entities["DATE"]:
+            entity_text += f"\n📅 Даты: {', '.join(set(entities['DATE']))}"
         
-        summary = summarize_text(transcript)
-        await update.message.reply_text(f"🎬 *Краткое содержание:*\n\n{summary}", parse_mode='Markdown')
+        return entity_text
 
-    elif is_article:
-        await update.message.reply_text("📄 Обрабатываю статью...")
-        title, text, error = extract_article_text(user_message)
-        if error:
-            await update.message.reply_text(error)
-            return
-        if not text:
-            await update.message.reply_text("❌ Не удалось извлечь текст.")
-            return
+    @staticmethod
+    def split_text(text: str, max_tokens: int = 500) -> List[str]:
+        words = text.split()
+        chunks = []
+        current_chunk = []
+        current_length = 0
         
-        summary = summarize_text(text)
-        response = f"📄 *{title}*\n\n✨ *Краткое содержание:*\n{summary}"
-        if len(response) > 4096:
-            for i in range(0, len(response), 4096):
-                await update.message.reply_text(response[i:i+4096], parse_mode='Markdown')
-        else:
-            await update.message.reply_text(response, parse_mode='Markdown')
-    else:
-        await update.message.reply_text("👋 Отправь ссылку на статью или YouTube видео.")
+        for word in words:
+            word_length = len(tokenizer.tokenize(word))
+            if current_length + word_length > max_tokens:
+                chunks.append(" ".join(current_chunk))
+                current_chunk = [word]
+                current_length = word_length
+            else:
+                current_chunk.append(word)
+                current_length += word_length
+        
+        if current_chunk:
+            chunks.append(" ".join(current_chunk))
+        
+        return chunks
 
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logger.info("🤖 Бот запущен и готов к работе (экстрактивный метод).")
-    app.run_polling()
+def generate_summary(text: str) -> str:
+    try:
+        inputs = tokenizer(
+            text,
+            max_length=1024,
+            truncation=True,
+            padding='max_length',
+            return_tensors="pt"
+        )
+
+        summary_ids = model.generate(
+            inputs.input_ids,
+            max_length=200,
+            min_length=50,
+            length_penalty=1.0,
+            num_beams=5,
+            repetition_penalty=1.2,
+            no_repeat_ngram_size=3,
+            temperature=0.7,
+            top_k=50,
+            top_p=0.9,
+            do_sample=True
+        )
+        
+        return tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+    except Exception as e:
+        logger.error(f"Error generating summary: {e}")
+        return "Не удалось сгенерировать суммаризацию"
+
+# /start
+@dp.message(Command("start"))
+async def start_command(message: Message):
+    start_text = (
+        "Привет! Я бот для анализа чатов и суммаризации сообщений в них. "
+        "Вот что ты можешь сделать:\n\n"
+        "/summary - Получить сводку всех сообщений.\n"
+        "/set_limit <число> - Установить лимит сообщений для суммаризации (по умолчанию 100)."
+    )
+    await message.answer(start_text)
+
+# /set_limit для изменения лимита сообщений
+@dp.message(Command("set_limit"))
+async def set_limit_command(message: Message):
+    try:
+        limit = int(message.get_args())
+        if limit <= 0:
+            await message.answer("Количество сообщений должно быть положительным числом.")
+        else:
+            global default_message_limit
+            default_message_limit = limit
+            for user_messages in messages_store.values():
+                user_messages.maxlen = limit
+            await message.answer(f"Теперь лимит сообщений для суммаризации: {default_message_limit}")
+    except ValueError:
+        await message.answer("Пожалуйста, укажите число для лимита.")
+
+# /summary
+@dp.message(Command("summary"))
+async def summary_command(message: Message):
+    if not messages_store:
+        return await message.answer("Нет сообщений для анализа.")
+    
+    processing_message = await message.answer("⏳ Генерация сводки, подождите...")
+    
+    try:
+        summaries = []
+        for username, user_messages in messages_store.items():
+            clean_text = ' '.join([TextProcessor.clean_text(msg) for msg in user_messages])
+            entity_text = TextProcessor.extract_named_entities(clean_text)
+            
+            if clean_text.strip():
+                text_chunks = TextProcessor.split_text(clean_text)
+                user_summary = " ".join([generate_summary(chunk) for chunk in text_chunks])
+                summaries.append(f"👤 *{username}*: {user_summary}{entity_text}")
+        
+        if summaries:
+            summary_text = "\n\n".join(summaries)
+
+            MAX_MESSAGE_LENGTH = 4000
+            for i in range(0, len(summary_text), MAX_MESSAGE_LENGTH):
+                await message.answer(summary_text[i:i + MAX_MESSAGE_LENGTH], parse_mode="Markdown")
+        else:
+            await message.answer("Не удалось создать сводку.")
+        
+    except Exception as e:
+        logger.error(f"Summary error: {e}")
+        await message.answer("Ошибка при генерации сводки")
+    
+    await bot.delete_message(message.chat.id, processing_message.message_id)
+
+# Обработчик хранения
+@dp.message()
+async def store_message(message: Message):
+    if message.text and message.from_user.username:
+        user_messages = messages_store[message.from_user.username]
+        if len(user_messages) >= default_message_limit:
+            user_messages.popleft()
+        user_messages.append(message.text)
 
 if __name__ == '__main__':
-    main()
+    dp.run_polling(bot)
