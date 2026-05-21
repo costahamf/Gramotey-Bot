@@ -1,2 +1,5 @@
 python-telegram-bot==21.10
 aiohttp==3.9.5
+torch==2.5.1
+transformers==4.46.3
+git+https://huggingface.co/kontur-ai/sbert_punc_case_ru
