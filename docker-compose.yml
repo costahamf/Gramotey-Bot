@@ -1,0 +1,17 @@
+services:
+  languagetool:
+    image: erikvl87/languagetool:latest
+    container_name: languagetool
+    ports:
+      - "8010:8010"
+    restart: unless-stopped
+
+  app:
+    build: .
+    container_name: grammar_bot
+    depends_on:
+      - languagetool
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN}
+      LT_API_URL: "http://languagetool:8010/v2/check"
+    restart: unless-stopped
