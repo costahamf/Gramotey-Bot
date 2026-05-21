@@ -1,2 +1,2 @@
 python-telegram-bot==21.10
-language-tool-python==2.8.2
+requests==2.32.3
