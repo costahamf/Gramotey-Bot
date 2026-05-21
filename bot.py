@@ -144,18 +144,19 @@ async def check_text(text: str) -> str:
             correction_text = ""
             if match.replacements:
                 repl = ", ".join(match.replacements[:5])
-                correction_text = f"➜ *Варианты:* {repl}"
+                correction_text = "➜ *Варианты:* " + repl
 
+            # Формируем строку без f-строк (используем конкатенацию)
             error_msg = (
-                f"{i+1}. **{error_type}**\n"
-                f"📝 Ошибка: `{error_word}`\n"
-                f"📖 Контекст: {context_clean}\n"
-                f"{correction_text}"
+                str(i+1) + ". **" + error_type + "**\n"
+                "📝 Ошибка: `" + error_word + "`\n"
+                "📖 Контекст: " + context_clean + "\n"
+                + correction_text
             )
             result_parts.append(error_msg)
 
         if len(matches) > 30:
-            result_parts.append(f"\n... и ещё {len(matches) - 30} ошибок.")
+            result_parts.append("\n... и ещё " + str(len(matches) - 30) + " ошибок.")
 
         return "\n\n".join(result_parts)
 
