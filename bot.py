@@ -86,19 +86,17 @@ async def check_text_yandex(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     text = clean_text(user_text)
     if not text:
-        await processing_msg.delete()
+        await safe_delete(processing_msg)
         await update.message.reply_text("❌ Текст не содержит значимых символов.")
         return
 
     try:
-        # Документация Яндекс.Спеллера: https://yandex.ru/dev/speller/
         url = "https://speller.yandex.net/services/spellservice.json/checkText"
         params = {
             "text": text,
             "lang": "ru",
-            "options": 5  # 0 — стандартная проверка
+            "options": 5   # 5 = орфография + грамматика (запятые, согласование)
         }
-        # Запускаем запрос в отдельном потоке, чтобы не блокировать бота
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(None, lambda: requests.get(url, params=params, timeout=10))
         
@@ -109,10 +107,9 @@ async def check_text_yandex(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         
         if not errors:
             await update.message.reply_text("✅ Ошибок не найдено!")
-            await processing_msg.delete()
+            await safe_delete(processing_msg)
             return
 
-        # Обрабатываем ошибки
         result_parts = []
         for idx, err in enumerate(errors[:30], 1):
             word = err.get("word", "")
@@ -120,13 +117,12 @@ async def check_text_yandex(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             suggestions_text = ", ".join(suggestions[:5]) if suggestions else "нет вариантов"
             pos = err.get("pos", 0)
             length = err.get("len", 0)
-            # Пытаемся вырезать контекст вокруг ошибки
             context_start = max(0, pos - 20)
             context_end = min(len(text), pos + length + 20)
             context = text[context_start:context_end].replace('\n', ' ')
             
             error_msg = (
-                f"{idx}. 🔤 Орфография\n"
+                f"{idx}. 🔤 Орфография/Грамматика\n"
                 f"📝 Ошибка: `{word}`\n"
                 f"📖 Контекст: `...{context}...`\n"
                 f"➜ *Варианты:* {suggestions_text}"
@@ -144,7 +140,18 @@ async def check_text_yandex(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         logger.error(f"Ошибка Яндекс.Спеллера: {e}")
         await update.message.reply_text("❌ Сервис проверки временно недоступен. Попробуйте позже.")
     finally:
-        await processing_msg.delete()
+        await safe_delete(processing_msg)
+
+async def safe_delete(message):
+    """Безопасно удаляет сообщение, игнорируя ошибку 'Message to delete not found'"""
+    if message:
+        try:
+            await message.delete()
+        except Exception as e:
+            if "Message to delete not found" in str(e):
+                pass  # сообщение уже удалено, игнорируем
+            else:
+                logger.warning(f"Не удалось удалить сообщение: {e}")
 
 # ========== ЗАПУСК ==========
 def main():
