@@ -151,7 +151,8 @@ async def check_text(text: str) -> str:
             error_msg = (
                 f"{i+1}. **{error_type}**\n"
                 f"📝 Ошибка в слове: `{match.context[match.offset:match.offset+match.errorLength]}`\n"
-                f"📖 Полный контекст: {match.context.replace('`', '\\`')}\n"
+                context_escaped = match.context.replace('`', '\\`')
+                f"📖 Полный контекст: {context_escaped}\n"
                 f"{correction}"
             )
             result_parts.append(error_msg)
