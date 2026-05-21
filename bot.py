@@ -96,7 +96,7 @@ async def check_text_yandex(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         params = {
             "text": text,
             "lang": "ru",
-            "options": 0  # 0 — стандартная проверка
+            "options": 5  # 0 — стандартная проверка
         }
         # Запускаем запрос в отдельном потоке, чтобы не блокировать бота
         loop = asyncio.get_running_loop()
