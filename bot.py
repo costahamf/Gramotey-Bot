@@ -118,54 +118,50 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 async def check_text(text: str) -> str:
-    """Асинхронно проверяет текст через LanguageTool и возвращает отформатированный результат."""
     if not tool:
-        return "❌ Ошибка: LanguageTool не инициализирован. Проверьте настройки сервера."
+        return "❌ LanguageTool не инициализирован."
 
     if len(text) > MAX_TEXT_LENGTH:
-        return f"⚠️ Текст слишком длинный ({len(text)} символов). Максимальная длина: {MAX_TEXT_LENGTH} символов."
+        return f"⚠️ Текст слишком длинный. Максимум {MAX_TEXT_LENGTH} символов."
 
-    # Очищаем текст
     text = clean_text(text)
     if not text:
-        return "❌ Текст не содержит значимых символов."
+        return "❌ Текст пуст."
 
     try:
-        # Запускаем проверку в отдельном потоке, чтобы не блокировать бота
         loop = asyncio.get_running_loop()
         matches = await loop.run_in_executor(None, tool.check, text)
 
         if not matches:
-            return "✅ Ошибок не найдено! Текст написан правильно."
+            return "✅ Ошибок не найдено!"
 
-        # Группируем ошибки по контексту (чтобы не было дублей)
         result_parts = []
-        for i, match in enumerate(matches[:30]):  # Ограничиваем 30 ошибками на ответ
+        for i, match in enumerate(matches[:30]):
             error_type = "🔤 Орфография" if "SPELLING" in str(match.ruleId) else "📐 Грамматика"
+            error_word = match.context[match.offset:match.offset+match.errorLength]
+            context_clean = match.context.replace('`', '')  # убираем кавычки
+
+            correction_text = ""
             if match.replacements:
-                replacements = ", ".join(match.replacements[:5])
-                correction = f"➜ *Варианты исправления:* {replacements}"
-            else:
-                correction = ""
+                repl = ", ".join(match.replacements[:5])
+                correction_text = f"➜ *Варианты:* {repl}"
 
             error_msg = (
                 f"{i+1}. **{error_type}**\n"
-                f"📝 Ошибка в слове: `{match.context[match.offset:match.offset+match.errorLength]}`\n"
-                context_escaped = match.context.replace('`', '\\`')
-                f"📖 Полный контекст: {context_escaped}\n"
-                f"{correction}"
+                f"📝 Ошибка: `{error_word}`\n"
+                f"📖 Контекст: {context_clean}\n"
+                f"{correction_text}"
             )
             result_parts.append(error_msg)
 
-        # Если ошибок больше 30, добавляем предупреждение
         if len(matches) > 30:
             result_parts.append(f"\n... и ещё {len(matches) - 30} ошибок.")
 
         return "\n\n".join(result_parts)
 
     except Exception as e:
-        logger.error(f"Ошибка при проверке текста: {e}", exc_info=True)
-        return "❌ Произошла ошибка при проверке текста. Попробуйте ещё раз или отправьте текст меньшего объёма."
+        logger.error(f"Ошибка: {e}")
+        return "❌ Ошибка при проверке текста."
 
 # ========== ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ ==========
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
