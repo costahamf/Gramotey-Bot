@@ -33,7 +33,8 @@ logger = logging.getLogger(__name__)
 # Если в вашем окружении возникают проблемы, установите remote_server="https://languagetool.org/api/v2/"
 # или оставьте пустым для автоматического скачивания локальной версии.
 try:
-    tool = language_tool_python.LanguageTool("ru-RU")
+    # Используем публичный API LanguageTool
+    tool = language_tool_python.LanguageToolPublicAPI("ru-RU")
     logger.info("LanguageTool инициализирован для русского языка.")
 except Exception as e:
     logger.error(f"Ошибка инициализации LanguageTool: {e}")
