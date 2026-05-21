@@ -1,7 +1,8 @@
 import logging
 import os
 import re
-import requests
+import asyncio
+import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
@@ -26,9 +27,9 @@ async def start_keyboard():
 # ========== КОМАНДЫ ==========
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Привет! Я бот для проверки орфографии и грамматики русского языка.\n\n"
-        "📝 Просто отправь текст, и я найду ошибки с помощью Яндекс.Спеллера.\n\n"
-        "⚡️ Бесплатно, без ограничений и без подписок!",
+        "👋 Привет! Я бот для проверки орфографии, грамматики и пунктуации русского языка.\n\n"
+        "📝 Просто отправь текст, и я найду ошибки с помощью LanguageTool.\n\n"
+        "⚡️ Бесплатно, без подписок!",
         reply_markup=await start_keyboard(),
     )
 
@@ -47,9 +48,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "ℹ️ *О боте*\n\n"
-        "Использую API Яндекс.Спеллера — бесплатный сервис проверки русского языка.\n"
+        "Использую публичный API LanguageTool — мощный инструмент проверки грамматики и пунктуации.\n"
         "Бот не сохраняет ваши тексты.\n\n"
-        "Работает без Java, без ключей, без ограничений.",
+        "Работает без Java, без ключей, с ограничением до 20 запросов в минуту.",
         parse_mode="Markdown"
     )
 
@@ -63,84 +64,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif query.data == "about":
         await query.edit_message_text(
-            "ℹ️ Бесплатный бот на основе Яндекс.Спеллера. Без сохранения текстов.",
+            "ℹ️ Бесплатный бот на основе LanguageTool. Без сохранения текстов.",
             reply_markup=await start_keyboard(),
         )
 
-# ========== ОСНОВНАЯ ЛОГИКА (Яндекс.Спеллер) ==========
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def clean_text(text: str) -> str:
+    """Удаляет лишние пробелы и символы."""
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
-
-async def check_text_yandex(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Проверяет текст через Яндекс.Спеллер"""
-    user_text = update.message.text
-    if user_text.startswith('/'):
-        return
-
-    if len(user_text) > MAX_TEXT_LENGTH:
-        await update.message.reply_text(f"⚠️ Текст слишком длинный. Максимум {MAX_TEXT_LENGTH} символов.")
-        return
-
-    processing_msg = await update.message.reply_text("🔍 Проверяю текст через Яндекс.Спеллер...")
-
-    text = clean_text(user_text)
-    if not text:
-        await safe_delete(processing_msg)
-        await update.message.reply_text("❌ Текст не содержит значимых символов.")
-        return
-
-    try:
-        url = "https://speller.yandex.net/services/spellservice.json/checkText"
-        params = {
-            "text": text,
-            "lang": "ru",
-            "options": 5   # 5 = орфография + грамматика (запятые, согласование)
-        }
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(None, lambda: requests.get(url, params=params, timeout=10))
-        
-        if response.status_code != 200:
-            raise Exception(f"HTTP {response.status_code}")
-
-        errors = response.json()
-        
-        if not errors:
-            await update.message.reply_text("✅ Ошибок не найдено!")
-            await safe_delete(processing_msg)
-            return
-
-        result_parts = []
-        for idx, err in enumerate(errors[:30], 1):
-            word = err.get("word", "")
-            suggestions = err.get("s", [])
-            suggestions_text = ", ".join(suggestions[:5]) if suggestions else "нет вариантов"
-            pos = err.get("pos", 0)
-            length = err.get("len", 0)
-            context_start = max(0, pos - 20)
-            context_end = min(len(text), pos + length + 20)
-            context = text[context_start:context_end].replace('\n', ' ')
-            
-            error_msg = (
-                f"{idx}. 🔤 Орфография/Грамматика\n"
-                f"📝 Ошибка: `{word}`\n"
-                f"📖 Контекст: `...{context}...`\n"
-                f"➜ *Варианты:* {suggestions_text}"
-            )
-            result_parts.append(error_msg)
-
-        if len(errors) > 30:
-            result_parts.append(f"\n... и ещё {len(errors)-30} ошибок.")
-
-        final = "\n\n".join(result_parts)
-        for i in range(0, len(final), 4096):
-            await update.message.reply_text(final[i:i+4096], parse_mode="Markdown")
-
-    except Exception as e:
-        logger.error(f"Ошибка Яндекс.Спеллера: {e}")
-        await update.message.reply_text("❌ Сервис проверки временно недоступен. Попробуйте позже.")
-    finally:
-        await safe_delete(processing_msg)
 
 async def safe_delete(message):
     """Безопасно удаляет сообщение, игнорируя ошибку 'Message to delete not found'"""
@@ -149,9 +81,81 @@ async def safe_delete(message):
             await message.delete()
         except Exception as e:
             if "Message to delete not found" in str(e):
-                pass  # сообщение уже удалено, игнорируем
+                pass
             else:
                 logger.warning(f"Не удалось удалить сообщение: {e}")
+
+# ========== ОСНОВНАЯ ЛОГИКА (LanguageTool) ==========
+async def check_text_languagetool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_text = update.message.text
+    if user_text.startswith('/'):
+        return
+
+    if len(user_text) > MAX_TEXT_LENGTH:
+        await update.message.reply_text(f"⚠️ Текст слишком длинный. Максимум {MAX_TEXT_LENGTH} символов.")
+        return
+
+    processing_msg = await update.message.reply_text("🔍 Проверяю текст через LanguageTool...")
+
+    text = clean_text(user_text)
+    if not text:
+        await safe_delete(processing_msg)
+        await update.message.reply_text("❌ Текст не содержит значимых символов.")
+        return
+
+    url = "https://api.languagetool.org/v2/check"
+    data = {
+        "text": text,
+        "language": "ru-RU"
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=data, timeout=30) as response:
+                if response.status != 200:
+                    raise Exception(f"HTTP {response.status}")
+
+                result = await response.json()
+                matches = result.get("matches", [])
+
+                if not matches:
+                    await update.message.reply_text("✅ Ошибок не найдено!")
+                    await safe_delete(processing_msg)
+                    return
+
+                report_parts = []
+                for idx, match in enumerate(matches[:30], 1):
+                    message = match.get("message", "Ошибка")
+                    replacements = match.get("replacements", [])
+                    replacements_text = ", ".join([rep.get("value", "") for rep in replacements[:5]]) if replacements else "нет вариантов"
+                    offset = match.get("offset", 0)
+                    length = match.get("length", 0)
+                    start_ctx = max(0, offset - 20)
+                    end_ctx = min(len(text), offset + length + 20)
+                    context = text[start_ctx:end_ctx].replace('\n', ' ')
+                    error_word = text[offset:offset+length] if offset+length <= len(text) else "???"
+
+                    error_msg = (
+                        f"{idx}. 🔍 {message}\n"
+                        f"📝 Ошибка: `{error_word}`\n"
+                        f"📖 Контекст: `...{context}...`\n"
+                        f"➜ *Варианты:* {replacements_text}"
+                    )
+                    report_parts.append(error_msg)
+
+                if len(matches) > 30:
+                    report_parts.append(f"\n... и ещё {len(matches)-30} ошибок.")
+
+                final_report = "\n\n".join(report_parts)
+                for i in range(0, len(final_report), 4096):
+                    await update.message.reply_text(final_report[i:i+4096], parse_mode="Markdown")
+
+    except asyncio.TimeoutError:
+        await update.message.reply_text("❌ Сервис проверки не отвечает. Попробуйте позже.")
+    except Exception as e:
+        logger.error(f"Ошибка LanguageTool: {e}")
+        await update.message.reply_text("❌ Произошла ошибка при проверке текста. Попробуйте позже.")
+    finally:
+        await safe_delete(processing_msg)
 
 # ========== ЗАПУСК ==========
 def main():
@@ -160,11 +164,10 @@ def main():
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("about", cmd_about))
     app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_text_yandex))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_text_languagetool))
 
-    logger.info("Бот на Яндекс.Спеллер запущен...")
+    logger.info("Бот на LanguageTool запущен...")
     app.run_polling()
 
 if __name__ == "__main__":
-    import asyncio
     main()
